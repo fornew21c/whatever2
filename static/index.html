@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Chat</title>
+<title>Claude Chat with Tools</title>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -24,6 +24,7 @@
     align-items: center;
   }
   header h1 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+  header .subtitle { font-size: 0.8rem; color: #718096; margin-left: 0.5rem; }
   #messages {
     flex: 1;
     overflow-y: auto;
@@ -50,6 +51,85 @@
     animation: blink 1s infinite;
   }
   @keyframes blink { 50% { opacity: 0; } }
+  .tool {
+    margin: 0.5rem 0 0.5rem 0.5rem;
+    border: 1px solid #cbd5e0;
+    border-radius: 0.5rem;
+    max-width: 85%;
+    background: #f7fafc;
+    overflow: hidden;
+    font-size: 0.85rem;
+  }
+  .tool-header {
+    padding: 0.4rem 0.75rem;
+    background: #edf2f7;
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    border-bottom: 1px solid transparent;
+  }
+  .tool.open .tool-header { border-bottom-color: #cbd5e0; }
+  .tool-arrow {
+    display: inline-block;
+    transition: transform 0.15s;
+    color: #718096;
+    font-size: 0.7rem;
+  }
+  .tool.open .tool-arrow { transform: rotate(90deg); }
+  .tool-name {
+    font-weight: 600;
+    color: #2b6cb0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .tool-summary {
+    color: #4a5568;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.78rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .tool-status {
+    font-size: 0.75rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 0.75rem;
+    background: #e6fffa;
+    color: #234e52;
+  }
+  .tool-status[data-status="pending"] { background: #fef5e7; color: #7b341e; }
+  .tool-status[data-status="error"] { background: #fed7d7; color: #742a2a; }
+  .tool-body {
+    display: none;
+    padding: 0.6rem 0.75rem;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.78rem;
+  }
+  .tool.open .tool-body { display: block; }
+  .tool-section-label {
+    font-weight: 600;
+    color: #718096;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.25rem;
+  }
+  .tool-input, .tool-result-text {
+    background: #fff;
+    padding: 0.5rem;
+    border-radius: 0.25rem;
+    border: 1px solid #e2e8f0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #2d3748;
+    margin-bottom: 0.5rem;
+    max-height: 240px;
+    overflow-y: auto;
+  }
+  .tool-result-text:last-child { margin-bottom: 0; }
+  .tool-result-text.error { color: #c53030; border-color: #feb2b2; }
   footer {
     padding: 0.75rem 1rem 1rem;
     background: #fff;
@@ -101,19 +181,27 @@
     margin-top: 4rem;
     font-size: 0.95rem;
   }
+  .empty .tools-hint {
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>Claude Chat</h1>
+  <h1>Claude Chat <span class="subtitle">with file system tools</span></h1>
   <button class="secondary" id="reset">Reset</button>
 </header>
 <div id="messages">
-  <div class="empty">Start a conversation below.</div>
+  <div class="empty">
+    Ask about files in the workspace.
+    <div class="tools-hint">tools: list_directory · read_file · search_files · get_current_time · calculate</div>
+  </div>
 </div>
 <footer>
   <div class="input-row">
-    <textarea id="input" rows="1" placeholder="Type a message... (Enter to send, Shift+Enter for newline)"></textarea>
+    <textarea id="input" rows="1" placeholder='Try: "How many Python files are here?" or "Read agent.py and explain what it does"'></textarea>
     <button id="send">Send</button>
   </div>
 </footer>
@@ -124,25 +212,118 @@ const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const resetBtn = document.getElementById('reset');
 
+let currentAssistantEl = null;
+const toolEls = new Map();
+
 function clearEmpty() {
   const empty = messagesEl.querySelector('.empty');
   if (empty) empty.remove();
 }
 
-function addBubble(role, text) {
-  clearEmpty();
-  const div = document.createElement('div');
-  div.className = 'msg ' + role;
-  div.textContent = text;
-  messagesEl.appendChild(div);
+function scrollDown() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
-  return div;
 }
 
 function setBusy(busy) {
   sendBtn.disabled = busy;
   input.disabled = busy;
   sendBtn.textContent = busy ? 'Sending...' : 'Send';
+}
+
+function addUserBubble(text) {
+  clearEmpty();
+  const div = document.createElement('div');
+  div.className = 'msg user';
+  div.textContent = text;
+  messagesEl.appendChild(div);
+  scrollDown();
+}
+
+function ensureAssistantBubble() {
+  if (!currentAssistantEl) {
+    clearEmpty();
+    currentAssistantEl = document.createElement('div');
+    currentAssistantEl.className = 'msg assistant cursor';
+    messagesEl.appendChild(currentAssistantEl);
+  }
+  return currentAssistantEl;
+}
+
+function appendAssistantText(text) {
+  const el = ensureAssistantBubble();
+  el.textContent += text;
+  scrollDown();
+}
+
+function finishAssistantBubble() {
+  if (currentAssistantEl) {
+    currentAssistantEl.classList.remove('cursor');
+    if (!currentAssistantEl.textContent) {
+      currentAssistantEl.remove();
+    }
+    currentAssistantEl = null;
+  }
+}
+
+function summarizeInput(input) {
+  const json = JSON.stringify(input);
+  return json.length > 80 ? json.slice(0, 77) + '...' : json;
+}
+
+function addToolWidget(id, name, toolInput) {
+  finishAssistantBubble();
+  clearEmpty();
+
+  const wrap = document.createElement('div');
+  wrap.className = 'tool';
+
+  const header = document.createElement('div');
+  header.className = 'tool-header';
+  header.innerHTML = `
+    <span class="tool-arrow">▶</span>
+    <span class="tool-name">${name}</span>
+    <span class="tool-summary"></span>
+    <span class="tool-status" data-status="pending">running</span>
+  `;
+  header.querySelector('.tool-summary').textContent = summarizeInput(toolInput);
+  header.addEventListener('click', () => wrap.classList.toggle('open'));
+
+  const body = document.createElement('div');
+  body.className = 'tool-body';
+  body.innerHTML = `
+    <div class="tool-section-label">input</div>
+    <div class="tool-input"></div>
+    <div class="tool-section-label">result</div>
+    <div class="tool-result-text" data-pending="1">waiting for execution...</div>
+  `;
+  body.querySelector('.tool-input').textContent = JSON.stringify(toolInput, null, 2);
+
+  wrap.appendChild(header);
+  wrap.appendChild(body);
+  messagesEl.appendChild(wrap);
+  toolEls.set(id, wrap);
+  scrollDown();
+}
+
+function fillToolResult(id, content, isError) {
+  const wrap = toolEls.get(id);
+  if (!wrap) return;
+  const resultEl = wrap.querySelector('.tool-result-text');
+  resultEl.textContent = content;
+  resultEl.removeAttribute('data-pending');
+  if (isError) resultEl.classList.add('error');
+  const status = wrap.querySelector('.tool-status');
+  status.dataset.status = isError ? 'error' : 'ok';
+  status.textContent = isError ? 'error' : 'done';
+}
+
+function showError(message) {
+  finishAssistantBubble();
+  const div = document.createElement('div');
+  div.className = 'msg assistant error';
+  div.textContent = '[' + message + ']';
+  messagesEl.appendChild(div);
+  scrollDown();
 }
 
 input.addEventListener('input', () => {
@@ -159,7 +340,14 @@ input.addEventListener('keydown', (e) => {
 
 resetBtn.addEventListener('click', () => {
   messages.length = 0;
-  messagesEl.innerHTML = '<div class="empty">Start a conversation below.</div>';
+  toolEls.clear();
+  currentAssistantEl = null;
+  messagesEl.innerHTML = `
+    <div class="empty">
+      Ask about files in the workspace.
+      <div class="tools-hint">tools: list_directory · read_file · search_files · get_current_time · calculate</div>
+    </div>
+  `;
   input.focus();
 });
 
@@ -174,11 +362,10 @@ async function send() {
   setBusy(true);
 
   messages.push({ role: 'user', content: text });
-  addBubble('user', text);
+  addUserBubble(text);
 
-  const assistantEl = addBubble('assistant', '');
-  assistantEl.classList.add('cursor');
-  let acc = '';
+  let accumulated = '';
+  let hardError = false;
 
   try {
     const res = await fetch('/api/chat', {
@@ -204,29 +391,40 @@ async function send() {
       for (const evt of events) {
         if (!evt.startsWith('data: ')) continue;
         const data = JSON.parse(evt.slice(6));
-        if (data.text) {
-          acc += data.text;
-          assistantEl.textContent = acc;
-          messagesEl.scrollTop = messagesEl.scrollHeight;
-        } else if (data.error) {
-          assistantEl.textContent = '[' + data.error + ']';
-          assistantEl.classList.add('error');
+
+        switch (data.type) {
+          case 'text':
+            accumulated += data.text;
+            appendAssistantText(data.text);
+            break;
+          case 'tool_use':
+            addToolWidget(data.id, data.name, data.input);
+            break;
+          case 'tool_result':
+            fillToolResult(data.tool_use_id, data.content, data.is_error);
+            break;
+          case 'done':
+            finishAssistantBubble();
+            break;
+          case 'error':
+            showError(data.error);
+            hardError = true;
+            break;
         }
       }
     }
 
-    if (acc && !assistantEl.classList.contains('error')) {
-      messages.push({ role: 'assistant', content: acc });
-    } else if (!acc) {
-      // Pop the user message on hard error so they can retry
+    finishAssistantBubble();
+
+    if (accumulated && !hardError) {
+      messages.push({ role: 'assistant', content: accumulated });
+    } else {
       messages.pop();
     }
   } catch (e) {
-    assistantEl.textContent = '[Connection error: ' + e.message + ']';
-    assistantEl.classList.add('error');
+    showError('Connection error: ' + e.message);
     messages.pop();
   } finally {
-    assistantEl.classList.remove('cursor');
     setBusy(false);
     input.focus();
   }
